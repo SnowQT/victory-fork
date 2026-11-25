@@ -5665,6 +5665,22 @@ impl<'a> Lower<'a> {
                 }
                 return Ok(());
             }
+            // An image descriptor (eight dwords) picked from the view heap that nothing
+            // uses as one: the code reads only its size bits, to scale coordinates for
+            // samples through other loads (PS_PuddleDetect: width, height and base level
+            // of one texture, then two samples of others). The size bits come from the
+            // host view at the same heap slot, taken as a 2D texture.
+            // shortcut: an array, cube or 3D view there reads depth 1 and its type as 2D.
+            let heap = address.is_some_and(|a| {
+                self.x
+                    .native
+                    .layout
+                    .get(a.param)
+                    .is_some_and(|p| matches!(p.root, RootType::ResourceHeap | RootType::Table))
+            });
+            if count == 8 && heap {
+                return self.descriptor_words(inst, site, 0, code, count, (2, 0x409), Some(2), false, None);
+            }
             if std::env::var_os("VICTORY_DESC_WHY").is_some() {
                 eprintln!(
                     "DESC-WHY {:#x} {} scalar={:?} lane_copied={}",
@@ -5726,6 +5742,27 @@ impl<'a> Lower<'a> {
             }
             _ => return Err("a scalar memory read as data"),
         };
+        self.descriptor_words(inst, site, first, code, count, props, image, uav, used)
+    }
+
+    /// The dwords of the descriptor `inst` loads that a program reads as
+    /// numbers (sizes, a buffer's record count and address), from the host
+    /// view `props` names (`descriptor_data`); `image` is the image kind.
+    #[allow(clippy::too_many_arguments)]
+    fn descriptor_words(
+        &mut self,
+        inst: &Inst,
+        site: Site,
+        first: u8,
+        code: u8,
+        count: u32,
+        props: (u32, u32),
+        image: Option<u32>,
+        uav: bool,
+        used: Option<&'a UsedResource>,
+    ) -> Result<(), Why> {
+        const OTHER: Why = "a descriptor's address or format read as data";
+        let src = Source::Loaded { load: site, first };
         let h = self.handle(site, &src, false, props)?;
         let c = self.cur;
         let i32t = self.s.t.i32;

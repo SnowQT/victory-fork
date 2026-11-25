@@ -6212,8 +6212,27 @@ impl<'a> Lower<'a> {
             }
             Source::Phi { block, args } => {
                 let _ = site;
-                let phi = self.descriptor_phi(*block, args, sampler, 8)?;
-                Ok(self.s.heap_handle(self.cur, phi, sampler, false, props))
+                match self.descriptor_phi(*block, args, sampler, 8) {
+                    Ok(phi) => Ok(self.s.heap_handle(self.cur, phi, sampler, false, props)),
+                    // A sampler the code picks at a join between one built into it (four
+                    // constant dwords) and one from the heap (PS_TexturedDeferred and kin:
+                    // block 1 or 4 builds it, the other edge loads it). A heap index cannot
+                    // stand for the built one, so the built one serves on every edge.
+                    // shortcut: lanes that came by the heap's edge sample with the built
+                    // sampler's filter and wrap modes instead of the heap one's.
+                    Err(e) if sampler => {
+                        let built = src
+                            .leaves()
+                            .into_iter()
+                            .find(|l| matches!(l, Source::Constant(w) if w.len() >= 4))
+                            .cloned();
+                        match built {
+                            Some(c) => self.handle(site, &c, true, props),
+                            None => Err(e),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Source::Select { scc, args } => {
                 // The heap index of each choice, picked by SCC (uniform).
@@ -6274,7 +6293,12 @@ impl<'a> Lower<'a> {
                 Source::Phi { block: inner, args: inner_args } if depth > 0 => {
                     self.descriptor_phi(*inner, inner_args, sampler, depth - 1)?
                 }
-                _ => return Err(WHY),
+                other => {
+                    if std::env::var_os("VICTORY_DESC_WHY").is_some() {
+                        eprintln!("DESC-PHI block={block} pred={q} depth={depth} arg={other:?}");
+                    }
+                    return Err(WHY);
+                }
             };
             incoming.push((index, at));
         }
